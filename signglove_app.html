@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SignGlove</title>
+<style>
+:root{--bg:#f2f5f7;--panel:#fff;--ink:#14232e;--muted:#5b6b77;--line:#d3dce2;--accent:#1b5fa8;--good:#1e7e4f;--bad:#c0392b;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10181e;--panel:#18232b;--ink:#e3ebf0;--muted:#93a4b0;--line:#2c3b46;--accent:#6fb1ff;--good:#4cc790;--bad:#ef6b5b}}
+:root[data-theme="dark"]{--bg:#10181e;--panel:#18232b;--ink:#e3ebf0;--muted:#93a4b0;--line:#2c3b46;--accent:#6fb1ff;--good:#4cc790;--bad:#ef6b5b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:560px;margin:0 auto;padding:16px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+h1{font-size:1.4rem;margin:0}
+.pill{font-size:.85rem;padding:3px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted)}
+.pill.on{color:var(--good);border-color:var(--good)} .pill.err{color:var(--bad);border-color:var(--bad)}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;margin-bottom:12px}
+h2{font-size:.95rem;margin:0 0 8px;color:var(--muted);font-weight:600}
+button{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:6px;padding:8px 14px;cursor:pointer}
+button.main{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){button.main{color:#10181e}}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#last{font-size:4.5rem;line-height:1.1;text-align:center;min-height:5rem;font-weight:700;word-break:break-word}
+#buf{text-align:center;color:var(--muted);min-height:1.5rem}
+#sentence{min-height:3rem;font-size:1.25rem;margin-bottom:10px;word-break:break-word}
+select{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+ul{list-style:none;margin:0;padding:0;max-height:180px;overflow:auto;font-size:.88rem;color:var(--muted)}
+li{padding:2px 0;border-bottom:1px solid var(--line)}
+details summary{cursor:pointer;color:var(--muted);font-weight:600}
+code{font-size:.82rem;word-break:break-all}
+.note{font-size:.85rem;color:var(--muted);margin:8px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>SignGlove</h1><span id="status" class="pill">Not connected</span></header>
+
+  <section>
+    <h2>Glove connection</h2>
+    <div class="row"><button id="connect" class="main" type="button">Connect to glove</button><button id="disconnect" type="button" hidden>Disconnect</button></div>
+    <p class="note" id="support"></p>
+  </section>
+
+  <section aria-live="polite">
+    <h2>Last sign</h2>
+    <div id="last">-</div>
+    <div id="buf"></div>
+  </section>
+
+  <section>
+    <h2>Sentence</h2>
+    <div id="sentence"></div>
+    <div class="row"><button id="speak" type="button">Speak</button><button id="clear" type="button">Clear</button></div>
+  </section>
+
+  <section>
+    <h2>Voice</h2>
+    <div class="row">
+      <label for="lang">Language</label>
+      <select id="lang"><option value="fr-FR">Fran&ccedil;ais</option><option value="ar-SA">&#1575;&#1604;&#1593;&#1585;&#1576;&#1610;&#1577;</option><option value="en-US">English</option></select>
+      <label><input type="checkbox" id="auto" checked> Speak automatically</label>
+    </div>
+  </section>
+
+  <section>
+    <details>
+      <summary>Test without the glove</summary>
+      <div class="row" style="margin-top:10px">
+        <button type="button" data-sim="A">A</button><button type="button" data-sim="B">B</button><button type="button" data-sim="C">C</button>
+        <button type="button" data-sim="bonjour">bonjour</button><button type="button" data-sim="_">rest (_)</button>
+      </div>
+      <p class="note">Send A, B, C then rest: the app should speak the word "ABC".</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <ul id="log"></ul>
+    <p class="note">Glove protocol: BLE notification, text label such as <code>A</code>, <code>7:A</code> (counter:label), a word, or <code>_</code> for rest.</p>
+  </section>
+</div>
+
+<script>
+// Must match the ESP32 firmware
+const SERVICE = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+const CHAR = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+const DEVICE_NAME_PREFIX = 'SignGlove';
+const LETTER_TIMEOUT_MS = 2500;
+
+const $ = id => document.getElementById(id);
+let device = null, buf = [], sentence = [], timer = null, lastSeq = null;
+
+function say(text) {
+  if (!text || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = $('lang').value;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+function log(msg) {
+  const li = document.createElement('li');
+  li.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  $('log').prepend(li);
+  while ($('log').children.length > 60) $('log').lastChild.remove();
+}
+function setStatus(text, cls) { const s = $('status'); s.textContent = text; s.className = 'pill ' + (cls || ''); }
+function render() {
+  $('buf').textContent = buf.length ? 'Spelling: ' + buf.join(' ') : '';
+  $('sentence').textContent = sentence.join(' ');
+}
+function flush() {
+  clearTimeout(timer);
+  if (!buf.length) return;
+  const word = buf.join('');
+  buf = [];
+  sentence.push(word);
+  if ($('auto').checked) say(word);
+  render();
+}
+function handle(raw) {
+  let label = raw.trim();
+  const m = label.match(/^(\d+):(.*)$/);
+  if (m) {
+    const seq = Number(m[1]); label = m[2].trim();
+    if (lastSeq !== null && seq > lastSeq + 1) log('Missed ' + (seq - lastSeq - 1) + ' sign(s)');
+    lastSeq = seq;
+  }
+  if (!label) return;
+  log('Received: ' + label);
+  if (label === '_') { flush(); return; }
+  $('last').textContent = label;
+  if (label.length === 1) {
+    buf.push(label.toUpperCase());
+    clearTimeout(timer);
+    timer = setTimeout(flush, LETTER_TIMEOUT_MS);
+  } else {
+    flush();
+    sentence.push(label);
+    if ($('auto').checked) say(label);
+  }
+  render();
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { setStatus('Bluetooth not supported', 'err'); return; }
+  try {
+    say(' ');  // unlock speech on mobile (needs a tap)
+    setStatus('Searching...');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE] }, { namePrefix: DEVICE_NAME_PREFIX }],
+      optionalServices: [SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      setStatus('Disconnected', 'err'); log('Glove disconnected');
+      $('connect').hidden = false; $('disconnect').hidden = true;
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    const chr = await service.getCharacteristic(CHAR);
+    await chr.startNotifications();
+    chr.addEventListener('characteristicvaluechanged', e => handle(new TextDecoder().decode(e.target.value)));
+    lastSeq = null;
+    setStatus('Connected to ' + (device.name || 'glove'), 'on'); log('Connected');
+    $('connect').hidden = true; $('disconnect').hidden = false;
+  } catch (err) {
+    setStatus('Not connected', 'err'); log('Error: ' + err.message);
+  }
+}
+
+$('connect').addEventListener('click', connect);
+$('disconnect').addEventListener('click', () => { if (device && device.gatt.connected) device.gatt.disconnect(); });
+$('speak').addEventListener('click', () => { flush(); say(sentence.join(' ')); });
+$('clear').addEventListener('click', () => { buf = []; sentence = []; $('last').textContent = '-'; render(); });
+document.querySelectorAll('[data-sim]').forEach(b => b.addEventListener('click', () => { say(' '); handle(b.dataset.sim); }));
+
+$('support').textContent = navigator.bluetooth
+  ? 'Use Chrome on Android (or Chrome/Edge on a computer). The page must be opened over https.'
+  : 'This browser has no Web Bluetooth. Use Chrome on Android, or Chrome/Edge on a computer.';
+render();
+</script>
+</body>
+</html>
